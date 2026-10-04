@@ -1,0 +1,54 @@
+name: Diagnosis log
+description: Send the log of MX5Bridge_Diagnose.exe from a Pedalboard or Gigboard
+title: "[Diagnosis] <device>"
+labels: ["diagnosis"]
+body:
+  - type: dropdown
+    id: device
+    attributes:
+      label: Device
+      options:
+        - Pedalboard
+        - Gigboard
+        - MX5
+    validations:
+      required: true
+  - type: dropdown
+    id: nam
+    attributes:
+      label: Built with the NAM mod?
+      options:
+        - "No"
+        - "Yes"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Did the update install and the device start normally?
+      options:
+        - "Yes, everything normal"
+        - "Yes, but something behaves differently (see below)"
+        - "No (see below)"
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: After the update, these still work
+      options:
+        - label: Sound / rigs / footswitches as before
+        - label: USB transfer mode (rigs on the PC)
+        - label: USB audio
+  - type: textarea
+    id: log
+    attributes:
+      label: Diagnosis log
+      description: Drag the file MX5Bridge_Diagnose_<device>_<time>.txt into this field.
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: What did you notice? Errors, odd behaviour, screenshots.
