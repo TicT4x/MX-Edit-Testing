@@ -1,9 +1,10 @@
 # MX-Edit Testing – HeadRush Pedalboard & Gigboard
 
-This repository collects test reports for running the **MX5 Bridge** on the HeadRush
+This repository collects test reports for running the **HeadRush Bridge** on the HeadRush
 **Pedalboard** and **Gigboard**. The bridge and the editor themselves live in
 [TicT4x/MX-Edit](https://github.com/TicT4x/MX-Edit). They were developed and tested on a
-HeadRush **MX5**.
+HeadRush **MX5**. There the bridge is called *MX5 Bridge*. It is the same firmware add-on,
+here built for all three devices.
 
 The Pedalboard and the Gigboard run the same firmware line (2.7) as the MX5: the same start
 scripts, the same Linux kernel, the same rig database. The bridge changes the same files on all
@@ -36,7 +37,7 @@ wrong rigs and press the wrong switches. Editing `.rig` files offline works on e
 
 ## Steps
 
-1. Download `MX5Bridge_Testing_Patcher.exe` and `MX5Bridge_Diagnose.exe` from the
+1. Download `HeadRush_Bridge_Testing_Patcher.exe` and `HeadRush_Bridge_Diagnose.exe` from the
    [releases of this repository](https://github.com/TicT4x/MX-Edit-Testing/releases).
 2. Start the patcher, pick your device, tick *I understand the risk …* and click
    **Build updater**. The patcher downloads the official 2.7 updater for your device from
@@ -46,7 +47,7 @@ wrong rigs and press the wrong switches. Editing `.rig` files offline works on e
    new updater and install it.
 4. After the device has restarted, connect it to the PC via USB. Do not switch on USB audio or
    USB transfer mode.
-5. Double-click `MX5Bridge_Diagnose.exe` and follow the window. You need nothing special on the
+5. Double-click `HeadRush_Bridge_Diagnose.exe` and follow the window. You need nothing special on the
    device: no test rig and no particular setlist. The program **only reads** and changes nothing.
    * It waits until the device is connected and reads it (about 10 seconds).
    * It asks how many footswitches the device has, then shows the rig names it reads and asks
@@ -55,7 +56,7 @@ wrong rigs and press the wrong switches. Editing `.rig` files offline works on e
      effects on and off. It notices by itself when you have done that. In this view a switch
      does not change the rig. Press each switch once. Every press is confirmed on screen, and
      the test ends by itself.
-6. At the end the program saves `MX5Bridge_Diagnose_<device>_<time>.txt`, shows it in Explorer
+6. At the end the program saves `HeadRush_Bridge_Diagnose_<device>_<time>.txt`, shows it in Explorer
    and opens the *Diagnosis log* form of this repository in your browser. Fill in the form and
    drag the file into it. You need a free GitHub account. The log is also saved if something
    goes wrong. Please send it then too.
@@ -67,15 +68,15 @@ database layout. It does **not** contain your rig contents or any audio.
 
 * **The diagnosis does not find the device:** check the MIDI port list it prints. If you see
   the device under another name, run
-  `MX5Bridge_Diagnose.exe --in "<input name>" --out "<output name>"`.
+  `HeadRush_Bridge_Diagnose.exe --in "<input name>" --out "<output name>"`.
 * **USB audio or USB transfer mode stopped working:** please report it. To switch the bridge's
-  USB-MIDI off, put a file `usb_midi_aus.txt` into the `MX5Bridge` folder of the device's USB
-  drive and restart the device.
+  USB-MIDI off, put a file `usb_midi_aus.txt` into the `MX5Bridge` folder (its internal name) of the
+  device's USB drive and restart the device.
 * **The device does not start any more:** see *Risks* above. Then please report what you saw.
 
 ## What is in this repository
 
-* `diagnose/` – source of `MX5Bridge_Diagnose.exe` (Python, needs `pip install mido python-rtmidi`;
+* `diagnose/` – source of `HeadRush_Bridge_Diagnose.exe` (Python, needs `pip install mido python-rtmidi`;
   `python diagnose/geraet_diagnose.py`). It uses `bridge.py` from MX-Edit.
 * The testing patcher is the same source as the patcher in
   [MX-Edit/firmware](https://github.com/TicT4x/MX-Edit/tree/main/firmware). It is built with a

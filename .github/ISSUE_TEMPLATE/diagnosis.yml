@@ -1,5 +1,5 @@
 name: Diagnosis log
-description: Send the log of MX5Bridge_Diagnose.exe from a Pedalboard or Gigboard
+description: Send the log of HeadRush_Bridge_Diagnose.exe from a Pedalboard or Gigboard
 title: "[Diagnosis] <device>"
 labels: ["diagnosis"]
 body:
@@ -44,7 +44,7 @@ body:
     id: log
     attributes:
       label: Diagnosis log
-      description: Drag the file MX5Bridge_Diagnose_<device>_<time>.txt into this field.
+      description: Drag the file HeadRush_Bridge_Diagnose_<device>_<time>.txt into this field.
     validations:
       required: true
   - type: textarea

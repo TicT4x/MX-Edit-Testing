@@ -1,5 +1,5 @@
 blank_issues_enabled: true
 contact_links:
-  - name: MX5 Editor / MX5 Bridge on the MX5
+  - name: MX5 Editor or the bridge on an MX5
     url: https://github.com/TicT4x/MX-Edit/issues
     about: Problems with the editor or the bridge on an MX5 go to the main repository.

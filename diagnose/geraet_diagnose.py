@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""MX5 Bridge - Geraete-Diagnose fuer Tester mit HeadRush Pedalboard / Gigboard (auch MX5).
+"""HeadRush Bridge - Geraete-Diagnose fuer Tester mit HeadRush Pedalboard / Gigboard (auch MX5).
+Fuer Tester heisst die Bruecke "HeadRush Bridge" (Repo MX-Edit-Testing); intern ist es die MX5 Bridge.
 
 Liest ueber die Bruecke nur aus (nichts wird geschrieben, kein Rig geladen) und schreibt eine
-Logdatei MX5Bridge_Diagnose_<Geraet>_<Zeit>.txt, die Tester einreichen koennen: welche
+Logdatei HeadRush_Bridge_Diagnose_<Geraet>_<Zeit>.txt, die Tester einreichen koennen: welche
 Engine-Pfade es gibt (Fussschalter, Bank-Rigs, Dialogtasten, Pedale, Meter ...) mit ihren
 Werten und Auswahllisten, Firmware-/Systemangaben und das DB-Schema. Auf Wunsch fragt das
 Programm danach, was das Display zeigt (die Ansicht des Geraets erkennt es selbst und wartet
@@ -113,7 +114,7 @@ SQL = [
 class Log:
     """Sammelt alles fuer die Logdatei; Ausgaben gehen zusaetzlich auf die Konsole."""
     def __init__(self):
-        self.data = {'tool': 'MX5Bridge device diagnosis %s' % TOOL_VERSION,
+        self.data = {'tool': 'HeadRush Bridge device diagnosis %s' % TOOL_VERSION,
                      'time': datetime.datetime.now().isoformat(timespec='seconds'),
                      'pc': platform.platform(), 'python': sys.version.split()[0], 'errors': []}
         self.lines = []
@@ -217,7 +218,7 @@ def open_bridge(log, ports, wait=True):
     if not found:
         log.say('MIDI inputs :', ins)
         log.say('MIDI outputs:', outs)
-        raise BridgeError('No HeadRush MIDI port found. Is the MX5 Bridge firmware installed? Is the device in '
+        raise BridgeError('No HeadRush MIDI port found. Is the HeadRush Bridge firmware installed? Is the device in '
                           'USB audio or USB transfer mode (then switch that off)? If the device shows up under '
                           'another name above, start this program with --in "<name>" --out "<name>".')
     pin, pout = found
@@ -233,7 +234,7 @@ def open_bridge(log, ports, wait=True):
                 log.say('Waiting for the bridge to answer (up to 30 s) ...')
             time.sleep(1)
     br.close()
-    raise BridgeError('The device does not answer bridge requests. Is the MX5 Bridge firmware installed? '
+    raise BridgeError('The device does not answer bridge requests. Is the HeadRush Bridge firmware installed? '
                       'If you just switched it on, wait a minute and start this program again.')
 
 
@@ -467,7 +468,7 @@ def interactive(br, log, found):
 def write(log):
     dev = log.data.get('device') or (log.data.get('answers', {}).get('device') or '').strip() or 'device'
     dev = ''.join(c for c in dev if c.isalnum())[:20] or 'device'
-    name = 'MX5Bridge_Diagnose_%s_%s.txt' % (dev, datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
+    name = 'HeadRush_Bridge_Diagnose_%s_%s.txt' % (dev, datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
     text = '\n'.join(log.lines) + '\n\n===== JSON =====\n' + \
         json.dumps(log.data, indent=1, ensure_ascii=False, sort_keys=True) + '\n'
     # neben der EXE; ist der Ordner schreibgeschuetzt (z. B. Programme), dann Desktop / Dokumente / Temp
@@ -499,7 +500,7 @@ def show_file(path):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='MX5 Bridge device diagnosis (read-only)')
+    ap = argparse.ArgumentParser(description='HeadRush Bridge device diagnosis (read-only)')
     ap.add_argument('--auto', action='store_true', help='read only, ask no questions')
     ap.add_argument('--ports', action='store_true', help='list MIDI ports and exit')
     ap.add_argument('--in', dest='pin', help='MIDI input port name')
@@ -510,7 +511,7 @@ def main():
         print('out:', mido.get_output_names())
         return 0
     log = Log()
-    log.say('MX5 Bridge device diagnosis %s' % TOOL_VERSION)
+    log.say('HeadRush Bridge device diagnosis %s' % TOOL_VERSION)
     log.say('This program only READS from your device. It changes nothing: no rigs, no settings.')
     log.say('The log contains rig/setlist names and settings shown by the device, no audio and no rig contents.\n')
     br = None
