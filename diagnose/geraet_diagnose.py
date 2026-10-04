@@ -5,8 +5,11 @@ Liest ueber die Bruecke nur aus (nichts wird geschrieben, kein Rig geladen) und 
 Logdatei MX5Bridge_Diagnose_<Geraet>_<Zeit>.txt, die Tester einreichen koennen: welche
 Engine-Pfade es gibt (Fussschalter, Bank-Rigs, Dialogtasten, Pedale, Meter ...) mit ihren
 Werten und Auswahllisten, Firmware-/Systemangaben und das DB-Schema. Auf Wunsch fragt das
-Programm danach, was das Display zeigt, und zeichnet auf, welche Pfade sich beim Druecken der
-Fussschalter aendern (das Druecken macht der Tester selbst am Geraet).
+Programm danach, was das Display zeigt (die Ansicht des Geraets erkennt es selbst und wartet
+darauf), und zeichnet auf, welche Pfade sich beim Druecken der Fussschalter aendern (das Druecken
+macht der Tester selbst am Geraet, in der Stomp-Ansicht - dort laedt ein Schalter kein Rig).
+Fuer fremde Geraete gebaut: keine Voraussetzungen auf dem Geraet, wartet auf das Geraet, speichert
+das Log auch bei Fehlern/Abbruch und oeffnet am Ende das Issue-Formular von MX-Edit-Testing.
 
 Texte fuer Tester englisch (oeffentlich), Kommentare deutsch.
 
@@ -14,7 +17,7 @@ Texte fuer Tester englisch (oeffentlich), Kommentare deutsch.
     python geraet_diagnose.py --auto     nur auslesen, keine Fragen
     python geraet_diagnose.py --ports    MIDI-Ports anzeigen
 """
-import argparse, datetime, json, os, platform, sys, threading, time, traceback
+import argparse, datetime, json, os, platform, sys, time, traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -133,10 +136,6 @@ def ask(q, default=''):
     return a or default
 
 
-def yes(q):
-    return ask(q + ' [y/n] ').lower().startswith(('y', 'j'))
-
-
 def all_paths(log=None):
     paths = []
     try:
@@ -158,33 +157,84 @@ def all_paths(log=None):
     return out
 
 
-def open_bridge(log, ports):
+def key_pressed():
+    """Taste im Konsolenfenster gedrueckt (nur Windows; sonst nie) - zum Abbrechen von Warteschleifen."""
+    try:
+        import msvcrt
+    except ImportError:
+        return False
+    hit = False
+    while msvcrt.kbhit():
+        msvcrt.getwch()
+        hit = True
+    return hit
+
+
+def find_ports(ports):
+    """(Eingang, Ausgang) des HeadRush-Ports oder None. Mehrere Kandidaten: der Nutzer waehlt."""
+    if ports:
+        return ports
+    ins, outs = mido.get_input_names(), mido.get_output_names()
+    try:
+        return Bridge.find_ports()
+    except BridgeError:
+        pass
+    hi = [n for n in ins if 'headrush' in n.lower()]
+    ho = [n for n in outs if 'headrush' in n.lower()]
+    if len(hi) == 1 and len(ho) == 1:
+        return hi[0], ho[0]
+    if len(hi) > 1 and len(hi) == len(ho):
+        print('Several HeadRush MIDI ports found:')
+        for i, n in enumerate(hi, 1):
+            print('  %d. %s' % (i, n))
+        k = ask('Which one is the device to test? Number: ', '1')
+        k = int(k) - 1 if k.isdigit() and 0 < int(k) <= len(hi) else 0
+        return hi[k], ho[k]
+    return None
+
+
+def open_bridge(log, ports, wait=True):
+    """Port suchen und anpingen. wait: bis zu 5 min auf das Geraet warten (Taste = aufgeben)."""
+    t0, told = time.time(), False
+    while True:
+        found = find_ports(ports)
+        if found:
+            break
+        if not wait or time.time() - t0 > 300:
+            break
+        if not told:
+            log.say('Waiting for the device ...\n'
+                    '  - connect it to this PC with a USB cable and switch it on,\n'
+                    '  - wait about 20 seconds after it has started,\n'
+                    '  - do not switch on USB audio or USB transfer mode on the device.\n'
+                    '  (Press any key to give up.)')
+            told = True
+        if key_pressed():
+            break
+        time.sleep(1)
     ins, outs = mido.get_input_names(), mido.get_output_names()
     log.data['midi_ports'] = {'in': ins, 'out': outs}
-    log.say('MIDI inputs :', ins)
-    log.say('MIDI outputs:', outs)
-    try:
-        pin, pout = Bridge.find_ports()
-    except BridgeError:
-        if not ports:
-            raise BridgeError('Could not find the HeadRush MIDI port automatically. Run with --in "<name>" --out "<name>" '
-                              '(names above). Is the bridge firmware installed and the device not in USB audio / '
-                              'USB transfer mode?')
-        pin, pout = ports
-    if ports and ports[0]:
-        pin, pout = ports
+    if not found:
+        log.say('MIDI inputs :', ins)
+        log.say('MIDI outputs:', outs)
+        raise BridgeError('No HeadRush MIDI port found. Is the MX5 Bridge firmware installed? Is the device in '
+                          'USB audio or USB transfer mode (then switch that off)? If the device shows up under '
+                          'another name above, start this program with --in "<name>" --out "<name>".')
+    pin, pout = found
     log.data['ports_used'] = [pin, pout]
-    log.say('Using:', pin, '/', pout)
+    log.say('Found:', pin, '/', pout)
     br = Bridge(pin, pout)
-    for i in range(10):
+    for i in range(30):
         try:
             br.ping()
-            break
+            return br
         except BridgeError:
-            if i == 9:
-                raise BridgeError('The device does not answer. Wait ~15 s after power-on, then try again.')
+            if i == 0:
+                log.say('Waiting for the bridge to answer (up to 30 s) ...')
             time.sleep(1)
-    return br
+    br.close()
+    raise BridgeError('The device does not answer bridge requests. Is the MX5 Bridge firmware installed? '
+                      'If you just switched it on, wait a minute and start this program again.')
 
 
 def probe_engine(br, log):
@@ -277,32 +327,59 @@ def summary(log, found):
 
 
 # ---------- Fragen an den Tester ----------
-def watch(br, paths, log, label):
-    """Pfade pollen, bis der Tester Enter drueckt; Aenderungen mit Zeit aufzeichnen."""
-    stop = threading.Event()
-    events, last = [], {}
+def board_mode(br):
+    try:
+        return (br.get(RC + '/BoardMode') or {}).get('string') or ''
+    except BridgeError:
+        return ''
 
-    def loop():
-        t0 = time.time()
-        while not stop.is_set():
-            try:
-                cur = br.get_many(paths)
-            except BridgeError as e:
-                events.append({'t': round(time.time() - t0, 2), 'error': str(e)})
-                time.sleep(0.3)
-                continue
-            for p, i in cur.items():
-                v = {k: i.get(k) for k in ('value', 'state', 'index', 'string') if k in i}
-                if last.get(p) != v:
-                    if p in last:
-                        events.append({'t': round(time.time() - t0, 2), 'path': p, 'from': last[p], 'to': v})
-                    last[p] = v
-            time.sleep(0.03)
-    th = threading.Thread(target=loop, daemon=True)
-    th.start()
-    ask('')
-    stop.set()
-    th.join(2)
+
+def wait_for_view(br, log, view, how, timeout=180):
+    """Warten, bis das Geraet die Ansicht view zeigt (BoardMode). True = da, False = uebersprungen
+    (Taste) oder Zeit um. Ist sie schon da, wird nichts gefragt."""
+    if board_mode(br) == view:
+        return True
+    log.say('  -> Please switch the device to the %s view (%s).\n'
+            '     The test continues by itself as soon as the device shows it. (Press any key to skip.)' % (view, how))
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if board_mode(br) == view:
+            log.say('     OK, %s view detected.' % view)
+            return True
+        if key_pressed():
+            break
+        time.sleep(0.3)
+    log.say('     Skipped.')
+    return False
+
+
+def record(br, paths, log, label, idle_stop=8.0, max_s=120.0):
+    """Pfade pollen und Aenderungen mit Zeit aufzeichnen; jeder Tastendruck wird sofort gemeldet.
+    Ende: idle_stop s nach dem letzten Druck, nach max_s oder per Taste."""
+    events, last = [], {}
+    t0, last_press, seen = time.time(), None, []
+    while True:
+        now = time.time()
+        try:
+            cur = br.get_many(paths)
+        except BridgeError as e:
+            events.append({'t': round(now - t0, 2), 'error': str(e)})
+            time.sleep(0.3)
+            cur = {}
+        for p, i in cur.items():
+            v = {k: i.get(k) for k in ('value', 'state', 'index', 'string') if k in i}
+            if last.get(p) != v:
+                if p in last:
+                    events.append({'t': round(now - t0, 2), 'path': p, 'from': last[p], 'to': v})
+                    if p.startswith(RC + '/RawFootswitches/FS') and v.get('state') is True:
+                        last_press = now
+                        n = p.rsplit('FS', 1)[1]
+                        seen.append(n)
+                        print('     press %d detected (switch input %s)' % (len(seen), n), flush=True)
+                last[p] = v
+        if key_pressed() or now - t0 > max_s or (last_press and now - last_press > idle_stop):
+            break
+        time.sleep(0.03)
     log.data.setdefault('watch', {})[label] = events
     changed = sorted({e['path'] for e in events if 'path' in e})
     log.say('  %d changes in %d paths' % (len(events), len(changed)))
@@ -341,57 +418,84 @@ def press_map(events):
 
 
 def interactive(br, log, found):
+    """Gefuehrter Teil: nur Fragen, die das Programm nicht selbst beantworten kann. Die Ansicht des
+    Geraets wird selbst erkannt (BoardMode); in der Stomp-Ansicht laedt ein Fussschalter kein Rig
+    (am MX5 geprueft) - in der Rig-Ansicht wuerde er, daher dort kein Schaltertest."""
     q = log.data.setdefault('answers', {})
-    log.say('\n--- A few questions (just press Enter to skip one) ---')
-    q['device'] = ask('Which device is this (MX5 / Pedalboard / Gigboard)? ')
-    q['firmware_shown'] = ask('Firmware version shown in Global Settings (e.g. 2.7)? ')
-    q['footswitch_count'] = ask('How many footswitches does the device have? ')
+    modes = log.data.get('entries', {}).get(RC + '/BoardMode') or []
+    log.say('\n========== Part 2: three short checks with you ==========')
+    log.say('(Just press Enter if you do not know an answer.)\n')
+    q['footswitch_count'] = ask('1) How many footswitches does your device have? Number: ')
 
-    names = [(i, found[PC + '/RigName%d' % i].get('string')) for i in range(1, 17) if PC + '/RigName%d' % i in found]
-    if names:
-        log.say('\nPut the device into the RIG view (rig/bank list) and press Enter.')
-        ask('')
+    names = [i for i in range(1, 17) if PC + '/RigName%d' % i in found]
+    log.say('\n2) Rig names')
+    if names and 'Rig' in modes and wait_for_view(br, log, 'Rig', 'the list of rigs in banks'):
         try:
-            cur = br.get_many([PC + '/RigName%d' % i for i, _ in names] + [RC + '/BoardMode', PC + '/Rigs/LoadedName'])
+            cur = br.get_many([PC + '/RigName%d' % i for i in names])
             log.data['rig_view'] = cur
-            for i, _ in names:
-                log.say('  RigName%d = %r' % (i, (cur.get(PC + '/RigName%d' % i) or {}).get('string')))
-            log.say('  view = %r' % (cur.get(RC + '/BoardMode') or {}).get('string'))
+            log.say('   The bridge reads these names for the bank on the display:')
+            for i in names:
+                log.say('     %d. %s' % (i, (cur.get(PC + '/RigName%d' % i) or {}).get('string')))
         except BridgeError as e:
             log.error('rig view', e)
-        q['rigs_per_bank'] = ask('How many rigs does the display show per bank? ')
-        q['rig_names_match'] = ask('Are the names above the rigs of the shown bank, in the same order? [y/n/partly] ')
+        q['rigs_per_bank'] = ask('   How many rigs does the display show in one bank? Number: ')
+        q['rig_names_match'] = ask('   Are these the same names, in the same order, as on the display? [y/n] ')
 
-    log.say('\nFootswitch test. Put the device into the STOMP view (block on/off), so pressing a '
-            'switch does not change the rig.\nThen press Enter here, press EACH footswitch once from left '
-            'to right (top row first, if there are two), wait a second between presses,\nand press Enter '
-            'here again when done.')
-    if ask('Press Enter to start (or type s to skip): ').lower().startswith('s'):
+    log.say('\n3) Footswitch test')
+    if 'Stomp' in modes:
+        ok = wait_for_view(br, log, 'Stomp', 'the view where the footswitches switch effects on and off')
+    else:
+        ok = ask('   Switch the device to the view where the footswitches switch effects on and off, '
+                 'then press Enter (or type s to skip): ').lower() != 's'
+    if not ok:
         return
+    if (found.get(PC + '/Rigs/Dirty') or {}).get('state'):
+        log.say('   Note: the current rig has unsaved changes on the device. The test does not change that.')
     paths = [p for p in found if p.startswith((FS + '/FootSwitch', RC + '/RawFootswitches/', FS + '/SceneState',
                                                FS + '/LastScene', RC + '/ButtonText'))]
     paths += [RC + '/BoardMode', PC + '/Rigs/LoadedName', PC + '/Rigs/Dirty']
-    log.say('Recording ... press the footswitches now, then Enter.')
-    watch(br, paths, log, 'footswitches_stomp')
-
-    if yes('\nOptional: record the footswitches in the RIG view too (each press loads a rig)?'):
-        log.say('Switch to the RIG view, then press Enter, press each switch once, then Enter.')
-        ask('')
-        log.say('Recording ...')
-        watch(br, paths + [p for p in found if p.startswith(PC + '/RigName')], log, 'footswitches_rig')
-    q['notes'] = ask('\nAnything else you noticed (one line, optional)? ')
+    log.say('   Now press EACH footswitch once, from left to right (top row first if there are two).\n'
+            '   Wait about a second between presses. Every press is confirmed here.\n'
+            '   The test ends by itself 8 seconds after your last press.')
+    record(br, paths, log, 'footswitches_stomp')
+    n = len(log.data.get('press_map', {}).get('footswitches_stomp', []))
+    if n == 0:
+        log.say('   No press was detected. That is useful information too.')
+    q['notes'] = ask('\nAnything else you noticed? (one line, optional): ')
 
 
 def write(log):
     dev = log.data.get('device') or (log.data.get('answers', {}).get('device') or '').strip() or 'device'
     dev = ''.join(c for c in dev if c.isalnum())[:20] or 'device'
     name = 'MX5Bridge_Diagnose_%s_%s.txt' % (dev, datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
-    path = os.path.join(OUT_DIR, name)
-    with open(path, 'w', encoding='utf-8', newline='\n') as f:
-        f.write('\n'.join(log.lines) + '\n\n===== JSON =====\n')
-        json.dump(log.data, f, indent=1, ensure_ascii=False, sort_keys=True)
-        f.write('\n')
-    return path
+    text = '\n'.join(log.lines) + '\n\n===== JSON =====\n' + \
+        json.dumps(log.data, indent=1, ensure_ascii=False, sort_keys=True) + '\n'
+    # neben der EXE; ist der Ordner schreibgeschuetzt (z. B. Programme), dann Desktop / Dokumente / Temp
+    home = os.path.expanduser('~')
+    for d in (OUT_DIR, os.path.join(home, 'Desktop'), os.path.join(home, 'Documents'), home,
+              os.environ.get('TEMP', '')):
+        if not d:
+            continue
+        try:
+            path = os.path.join(d, name)
+            with open(path, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(text)
+            return path
+        except OSError:
+            continue
+    raise OSError('Could not write the log file anywhere')
+
+
+ISSUE_URL = 'https://github.com/TicT4x/MX-Edit-Testing/issues/new?template=diagnosis.yml'
+
+
+def show_file(path):
+    """Explorer mit der Logdatei markiert oeffnen (nur Windows)."""
+    try:
+        import subprocess
+        subprocess.Popen(['explorer', '/select,', path])
+    except Exception:
+        pass
 
 
 def main():
@@ -406,14 +510,16 @@ def main():
         print('out:', mido.get_output_names())
         return 0
     log = Log()
-    log.say('MX5 Bridge device diagnosis %s - reads only, changes nothing on the device.' % TOOL_VERSION)
+    log.say('MX5 Bridge device diagnosis %s' % TOOL_VERSION)
+    log.say('This program only READS from your device. It changes nothing: no rigs, no settings.')
     log.say('The log contains rig/setlist names and settings shown by the device, no audio and no rig contents.\n')
     br = None
     rc = 0
     try:
-        br = open_bridge(log, (a.pin, a.pout) if a.pin and a.pout else None)
+        br = open_bridge(log, (a.pin, a.pout) if a.pin and a.pout else None, wait=not a.auto)
         log.data['bridge'] = {'version': br.version, 'vnum': br.vnum}
         log.say('Bridge:', br.version)
+        log.say('\n========== Part 1: reading the device (about 10 seconds) ==========')
         probe_shell(br, log)
         found = probe_engine(br, log)
         probe_db(br, log)
@@ -421,17 +527,26 @@ def main():
         if not a.auto:
             interactive(br, log, found)
     except KeyboardInterrupt:
-        log.say('\nCancelled.')
+        log.say('\nCancelled - the log so far is saved anyway.')
         rc = 1
     except Exception as e:  # noqa: BLE001 - alles soll in die Logdatei
         log.error('main', e)
+        log.say('\nThe log is saved anyway - please send it, it helps to find the problem.')
         rc = 1
     finally:
         if br:
             br.close()
     path = write(log)
-    log.say('\nLog written: %s' % path)
-    log.say('Please attach this file to a GitHub issue: https://github.com/TicT4x/MX-Edit-Testing/issues')
+    log.say('\n========== Done ==========')
+    log.say('Log file: %s' % path)
+    if a.auto:
+        return rc
+    show_file(path)
+    log.say('\nPlease send it: on the GitHub page that opens, fill in the form and drag this file into the '
+            '"Diagnosis log" field.\n(You need a free GitHub account.) Address: %s' % ISSUE_URL)
+    if ask('\nPress Enter to open the page in your browser (or type n): ').lower() != 'n':
+        import webbrowser
+        webbrowser.open(ISSUE_URL)
     return rc
 
 

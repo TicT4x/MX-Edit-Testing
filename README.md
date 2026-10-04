@@ -44,15 +44,21 @@ wrong rigs and press the wrong switches. Editing `.rig` files offline works on e
    [NAM mod](https://github.com/lolgab/headrush-nam-mod) too.
 3. Put the device into firmware update mode (Global Settings › ⋯ › Firmware Update), start the
    new updater and install it.
-4. After the device has restarted, wait about 20 seconds. Connect it to the PC via USB. Do not
-   switch on USB audio or USB transfer mode.
-5. Start `MX5Bridge_Diagnose.exe`. It **only reads** from the device and changes nothing. It
-   then asks a few questions about what the display shows. For the footswitch test, press each
-   switch once while the program records. Do this in the Stomp view, so that no rig changes.
-6. The program writes `MX5Bridge_Diagnose_<device>_<time>.txt` next to itself.
-   [Open an issue](https://github.com/TicT4x/MX-Edit-Testing/issues/new/choose) with the
-   *Diagnosis log* form and attach that file. Also say whether the device behaved normally after
-   the update (sound, footswitches, USB transfer mode, USB audio).
+4. After the device has restarted, connect it to the PC via USB. Do not switch on USB audio or
+   USB transfer mode.
+5. Double-click `MX5Bridge_Diagnose.exe` and follow the window. You need nothing special on the
+   device: no test rig and no particular setlist. The program **only reads** and changes nothing.
+   * It waits until the device is connected and reads it (about 10 seconds).
+   * It asks how many footswitches the device has, then shows the rig names it reads and asks
+     whether they match the display.
+   * For the footswitch test it asks you to switch to the view where the footswitches turn
+     effects on and off. It notices by itself when you have done that. In this view a switch
+     does not change the rig. Press each switch once. Every press is confirmed on screen, and
+     the test ends by itself.
+6. At the end the program saves `MX5Bridge_Diagnose_<device>_<time>.txt`, shows it in Explorer
+   and opens the *Diagnosis log* form of this repository in your browser. Fill in the form and
+   drag the file into it. You need a free GitHub account. The log is also saved if something
+   goes wrong. Please send it then too.
 
 The log contains the rig and setlist names your device shows, the device settings and the
 database layout. It does **not** contain your rig contents or any audio.
