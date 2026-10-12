@@ -2,23 +2,30 @@
 """HeadRush Bridge - Geraete-Diagnose fuer Tester mit HeadRush Pedalboard / Gigboard (auch MX5).
 Fuer Tester heisst die Bruecke "HeadRush Bridge" (Repo MX-Edit-Testing); intern ist es die MX5 Bridge.
 
-Liest ueber die Bruecke nur aus (nichts wird geschrieben, kein Rig geladen) und schreibt eine
-Logdatei HeadRush_Bridge_Diagnose_<Geraet>_<Zeit>.txt, die Tester einreichen koennen: welche
-Engine-Pfade es gibt (Fussschalter, Bank-Rigs, Dialogtasten, Pedale, Meter ...) mit ihren
-Werten und Auswahllisten, Firmware-/Systemangaben und das DB-Schema. Auf Wunsch fragt das
-Programm danach, was das Display zeigt (die Ansicht des Geraets erkennt es selbst und wartet
-darauf), und zeichnet auf, welche Pfade sich beim Druecken der Fussschalter aendern (das Druecken
-macht der Tester selbst am Geraet, in der Stomp-Ansicht - dort laedt ein Schalter kein Rig).
-Fuer fremde Geraete gebaut: keine Voraussetzungen auf dem Geraet, wartet auf das Geraet, speichert
-das Log auch bei Fehlern/Abbruch und oeffnet am Ende das Issue-Formular von MX-Edit-Testing.
+Ein Werkzeug, das alles sammelt, was fuer die Unterstuetzung eines Geraets in MX-Edit noetig ist.
+Es schreibt nichts aufs Geraet und laedt kein Rig. Teil 1 liest selbststaendig:
+  - Engine-Pfade (Liste aus den drei Firmware-Binaries + nummerierte Muster) mit Werten und
+    kurzen Auswahllisten; Luecken in nummerierten Reihen werden einzeln nachgeprueft
+    (Pedalboard-Log 1: FootSwitch2/4 fehlten, 1/3/5-8 nicht),
+  - Fussschalter-Zuweisungen inkl. Scene-Plaetze (translator.slot) und Scene-Presets,
+  - System (Modell, Firmware, USB-Gadget), DB: Schema, Zeilen je Tabelle, Rig-Liste (nur Namen,
+    Reihenfolge, Farbe, Programmnummer, Version), alle Setlist-/Song-Tabellen (Pedalboard hat
+    setlist_songs/setlist_song_rigs), Aufbau (Schluessel ohne Werte) des geladenen Rigs und je
+    Rig-Version eines Beispiel-Rigs.
+Teil 2 ist eine gefuehrte Runde, in der das Programm nur beobachtet, was der Tester am Geraet tut
+(Ansicht wird selbst erkannt): Rig-Ansicht (Namen bestaetigen, eine Bank vor und zurueck),
+Stomp-Ansicht (jeden Effekt-/Scene-Schalter einmal; welche, sagt das Programm anhand der
+Displaytexte - Rig-/Bank-/Looper-Schalter werden ausgelassen), optional Setlists/Songs. Dabei
+werden alle gefundenen Pfade beobachtet; jede neu erreichte Ansicht wird festgehalten.
 
+Das Log wird nach jedem Teil gespeichert (auch bei Absturz/Abbruch vorhanden).
 Texte fuer Tester englisch (oeffentlich), Kommentare deutsch.
 
-    python geraet_diagnose.py            Ausgabe + Fragen
+    python geraet_diagnose.py            Ausgabe + gefuehrte Runde
     python geraet_diagnose.py --auto     nur auslesen, keine Fragen
     python geraet_diagnose.py --ports    MIDI-Ports anzeigen
 """
-import argparse, datetime, json, os, platform, sys, time, traceback
+import argparse, datetime, json, os, platform, re, sys, time, traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -26,24 +33,30 @@ sys.path.insert(1, os.path.dirname(HERE))   # bridge.py liegt im Editor-Ordner
 FROZEN = getattr(sys, 'frozen', False)
 DATA = getattr(sys, '_MEIPASS', HERE)
 OUT_DIR = os.path.dirname(os.path.abspath(sys.executable)) if FROZEN else os.getcwd()
+try:
+    sys.stdout.reconfigure(errors='replace')   # Pfeile in Displaytexten auf alten Konsolen
+except Exception:
+    pass
 
 try:
     import mido
 except ImportError:
     print('Python package "mido" is missing:  pip install mido python-rtmidi')
     sys.exit(1)
-from bridge import Bridge, BridgeError
+from bridge import Bridge, BridgeError, sql_lit
 
-TOOL_VERSION = '1'
+TOOL_VERSION = '2'
 E = '/Engine'
 PC, RC, FS = E + '/PresetCtrl', E + '/RedirCtrl', E + '/FootSwitch'
+BOARD = RC + '/BoardMode'
+SLOTS = 11
 
 # Nummerierte Pfade: (Muster, hoechste Nummer). Die Firmware baut sie mit %1 zusammen, im
 # Binary stehen sie daher nicht vollstaendig (beim Pedalboard z. B. RigName%1).
 NUMBERED = [
     (PC + '/RigName%d', 16), (PC + '/RigColour%d', 16), (PC + '/LoadRig%d', 16),
     (PC + '/SetRigName%d', 16), (PC + '/SetRigColour%d', 16), (PC + '/LoadSetRig%d', 16),
-    (PC + '/SetName%d', 8), (RC + '/AccessSet%d', 8),
+    (PC + '/SetName%d', 12), (RC + '/AccessSet%d', 12), (PC + '/SongName%d', 12),
     (RC + '/Button%d', 16), (RC + '/ButtonText%d', 16), (RC + '/ButtonTextLow%d', 16),
     (RC + '/ButtonCol%d', 16), (RC + '/ButtonTimer%d', 16),
     (RC + '/RawFootswitches/FS%d', 16), (RC + '/On%d', 16), (RC + '/Encoder%d', 8),
@@ -53,7 +66,7 @@ NUMBERED = [
     (FS + '/Mode%d', 16), (FS + '/Module%d', 16), (FS + '/ModuleList%d', 16),
     (FS + '/Operation%d', 16), (FS + '/OperationList%d', 16), (FS + '/UserFootSwitchText%d', 16),
     (FS + '/SceneNumberOfStates%d', 16), (FS + '/MacroColour%d', 16), (FS + '/State2MacroColour%d', 16),
-    (FS + '/SceneState%d', 16), (FS + '/SceneActive%d', 16), (FS + '/Scene%d', 16),
+    (FS + '/SceneState%d', 16), (FS + '/SceneActive%d', 16), (FS + '/Scene%d', 16), (FS + '/State2Scene%d', 16),
     (E + '/Patch/Chain/ModuleType%d', 16), (E + '/Patch/Chain/CanDouble%d', 16),
 ]
 for _p in (1, 2, 3, 4):
@@ -62,19 +75,19 @@ for _p in (1, 2, 3, 4):
 EXTRA = [PC + '/Rigs/' + n for n in ('LoadedName', 'LoadedID', 'Dirty', 'LoadedProgNum', 'ReceivePresetIndex',
                                       'SendPresetIndex', 'SelectedID', 'LoadedColor')] + \
         [E + '/Pedal%d/PedalMode' % p for p in (1, 2, 3, 4)] + \
-        [RC + '/BoardMode', RC + '/CurModule', RC + '/CurModuleWithDoubled', RC + '/AccessRigView',
+        [BOARD, RC + '/CurModule', RC + '/CurModuleWithDoubled', RC + '/AccessRigView',
          RC + '/AccessTuner', RC + '/ExitTuner', RC + '/EditModeSaveRig', PC + '/NextPreset', PC + '/PrevPreset',
          E + '/Patch/Chain/Routing', E + '/Patch/Rig/Tempo', E + '/Patch/Rig/TempoFromMaster',
          E + '/Patch/Amp/Type', E + '/Patch/Cab/CabType', E + '/InputMeter/Current', E + '/InputMeter/Peak',
          E + '/OutputMeterL/Current', E + '/OutputMeterR/Current', E + '/FFTCtrl/TunerString',
          E + '/FFTCtrl/TunerCents', E + '/FFTCtrl/TunerRef', E + '/AudioCtrl/Input/TunerOn',
-         E + '/AudioCtrl/Input/TunerMuting', FS + '/LastScene']
+         E + '/AudioCtrl/Input/TunerMuting', FS + '/LastScene', FS + '/LastSceneState']
 
 # Auswahllisten, die immer gelesen werden (sonst nur kurze Listen, s. MAX_ENTRIES_AUTO)
-ENTRIES_ALWAYS = [RC + '/BoardMode', RC + '/CurModule', RC + '/CurModuleWithDoubled', E + '/Patch/Chain/Routing',
+ENTRIES_ALWAYS = [BOARD, RC + '/CurModule', RC + '/CurModuleWithDoubled', E + '/Patch/Chain/Routing',
                   E + '/Patch/Chain/ModuleType1', E + '/Patch/Amp/Type', E + '/Patch/Cab/CabType']
 MAX_ENTRIES_AUTO = 40
-MAX_ENTRIES_CALLS = 400     # MX5: 256 Listen (~1 s); das Pedalboard hat mehr Pfade
+MAX_ENTRIES_CALLS = 500
 # Erster Eintrag von /proc/device-tree/compatible -> Geraet (Patcher: bridgepatch.MODELS)
 COMPATIBLE = {'inmusic,hg04': 'MX5', 'inmusic,mg01': 'Pedalboard', 'inmusic,hg02': 'Gigboard'}
 
@@ -96,19 +109,47 @@ SHELL = [
     "free -k",
     "cat /proc/cpuinfo | grep -i -E 'hardware|model name' | sort | uniq -c",
     "ls /media/az01-internal/Evil/usb_mnt 2>/dev/null",
+    "ls /media/az01-internal/Evil/usb_mnt/Setlists 2>/dev/null | head -30",
     "ls /NAM /media/az01-internal/Evil/usb_mnt/NAM 2>/dev/null | head -5",
     "cat /tmp/mx5bridge/nam-aktiv 2>/dev/null; ls /tmp/mx5bridge 2>/dev/null | head -20",
 ]
 
 SQL = [
     ("schema", "select type, name, sql from sqlite_master where sql is not null order by name"),
-    ("counts", "select (select count(*) from rigs) as rigs, (select count(*) from setlists) as setlists, "
-               "(select count(*) from setlist_rigs) as setlist_rigs, (select count(*) from blocks) as blocks"),
     ("settings", "select name, length(value) as len, case when name in ('db_version', 'RigVersion', 'State_Last') "
                  "then value end as value from settings"),
     ("block_types", "select type, count(*) as n from blocks group by type order by type"),
     ("rig_versions", "select json_extract(content, '$.info.version') as v, count(*) as n from rigs group by v"),
 ]
+# Tabellen, die nicht vollstaendig ins Log kommen (Inhalte bzw. schon oben zusammengefasst)
+DB_SKIP = ('rigs', 'blocks', 'settings')
+DB_BIG_COLS = ('content', 'data', 'blob', 'value')
+
+# Beobachtung waehrend der gefuehrten Runde: Pfade, die sich von allein aendern
+NOISY = re.compile(r'Meter|Tuner|FFTCtrl|/Looper/(RelativPos|LengthText|Remaining)|CPU|Timer|Peak|Current')
+# Displaytexte von Schaltern, die beim Schaltertest ausgelassen werden (laden ein Rig/Ansicht wechseln)
+BROAD_CHUNK = 80
+SKIP_LABEL = re.compile(r'\b(rig|bank|looper|tuner|exit|set|setlist|song|tempo|tap|mode|edit)\b', re.I)
+VIEW_PATHS = re.compile(r'/RedirCtrl/(Button|ButtonText|ButtonTextLow|ButtonCol|On)\d+$|/BoardMode$|'
+                        r'/PresetCtrl/(RigName|RigColour|SetName|SetRigName|SetRigColour|SongName)\d+$|'
+                        r'/Rigs/(LoadedName|LoadedID|Dirty)$|/FootSwitch/(FootSwitchText|FootSwitchColour|'
+                        r'FootSwitch|FootSwitchOn)\d+$|/FootSwitch/LastScene')
+
+_COMPACT_JS = ('var P = %s, F = ["value", "unnormalized", "state", "index", "string"], o = []; '
+               'function f(t, k) { try { var v = t[k], y = typeof v; '
+               '  return y == "number" || y == "boolean" || y == "string" ? v : null; } catch (e) { return null; } } '
+               'for (var i = 0; i < P.length; i++) { var p = null; try { p = App.getProperty(P[i]); } catch (e) {} '
+               '  var t = p && p.translator; if (!t) { o.push(0); continue; } var r = []; '
+               '  for (var k = 0; k < F.length; k++) r.push(f(t, F[k])); o.push(r); } '
+               'return JSON.stringify(o);')
+_FIELDS = ('value', 'unnormalized', 'state', 'index', 'string')
+_EXIST_JS = ('var P = %s, o = {}; for (var i = 0; i < P.length; i++) { try { var p = App.getProperty(P[i]); '
+             'o[P[i]] = !p ? "none" : (p.translator ? "translator" : "property"); } catch (e) { o[P[i]] = "error " + e; } } '
+             'return JSON.stringify(o);')
+_SCENE_JS = ('var N = %s, o = {}; for (var i = 0; i < N.length; i++) { try { '
+             'var t = App.getProperty(N[i]).translator, l = []; '
+             'for (var k = 0; k < %d; k++) { var x = t.slot(k); l.push([String(x.effect), Number(x.mode)]); } o[N[i]] = l; '
+             '} catch (e) { o[N[i]] = "error " + e; } } return JSON.stringify(o);')
 
 
 class Log:
@@ -118,6 +159,7 @@ class Log:
                      'time': datetime.datetime.now().isoformat(timespec='seconds'),
                      'pc': platform.platform(), 'python': sys.version.split()[0], 'errors': []}
         self.lines = []
+        self.path = None
 
     def say(self, *a):
         t = ' '.join(str(x) for x in a)
@@ -137,6 +179,19 @@ def ask(q, default=''):
     return a or default
 
 
+def guarded(log, where, fn, *a):
+    """Ein Teil der Diagnose; ein Fehler darin bricht die anderen nicht ab (Verbindungsverlust schon)."""
+    try:
+        return fn(*a)
+    except KeyboardInterrupt:
+        raise
+    except Exception as e:  # noqa: BLE001 - alles soll in die Logdatei
+        log.error(where, e)
+        if isinstance(e, BridgeError) and str(e).startswith(('Keine Antwort', 'MIDI-Port')):
+            raise
+        return None
+
+
 def all_paths(log=None):
     paths = []
     try:
@@ -150,12 +205,7 @@ def all_paths(log=None):
     for pat, n in NUMBERED:
         paths += [pat % i for i in range(1, n + 1)]
     paths += EXTRA
-    seen, out = set(), []
-    for p in paths:
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
-    return out
+    return list(dict.fromkeys(paths))
 
 
 def key_pressed():
@@ -207,7 +257,8 @@ def open_bridge(log, ports, wait=True):
             log.say('Waiting for the device ...\n'
                     '  - connect it to this PC with a USB cable and switch it on,\n'
                     '  - wait about 20 seconds after it has started,\n'
-                    '  - do not switch on USB audio or USB transfer mode on the device.\n'
+                    '  - do not switch on USB audio or USB transfer mode on the device,\n'
+                    '  - close MX-Edit if it is open.\n'
                     '  (Press any key to give up.)')
             told = True
         if key_pressed():
@@ -224,23 +275,49 @@ def open_bridge(log, ports, wait=True):
     pin, pout = found
     log.data['ports_used'] = [pin, pout]
     log.say('Found:', pin, '/', pout)
-    br = Bridge(pin, pout)
+    br = None
     for i in range(30):
         try:
+            if br is None:
+                br = Bridge(pin, pout)
             br.ping()
             return br
-        except BridgeError:
+        except BridgeError as e:
             if i == 0:
                 log.say('Waiting for the bridge to answer (up to 30 s) ...')
+            if 'Port' in str(e) and br is None:   # Port belegt (z. B. MX-Edit offen)
+                log.say('  The MIDI port is busy - is MX-Edit or another MIDI program open? Please close it.')
             time.sleep(1)
-    br.close()
+    if br:
+        br.close()
     raise BridgeError('The device does not answer bridge requests. Is the HeadRush Bridge firmware installed? '
                       'If you just switched it on, wait a minute and start this program again.')
 
 
+# ---------- Lesen ----------
+def compact(br, paths, group=250):
+    """Werte vieler Pfade in wenigen evals (nur value/unnormalized/state/index/string); fehlende
+    Pfade fehlen im Ergebnis. Faellt auf get_many zurueck, wenn eval scheitert."""
+    out = {}
+    paths = list(dict.fromkeys(paths))
+    for i in range(0, len(paths), group):
+        part = paths[i:i + group]
+        try:
+            vals = json.loads(br.eval(_COMPACT_JS % json.dumps(part)))
+        except (BridgeError, ValueError):
+            for p, v in br.get_many(part).items():
+                if isinstance(v, dict) and v.get('ok'):
+                    out[p] = {k: v[k] for k in _FIELDS if k in v}
+            continue
+        for p, v in zip(part, vals):
+            if v:
+                out[p] = {k: x for k, x in zip(_FIELDS, v) if x is not None}
+    return out
+
+
 def probe_engine(br, log):
     paths = all_paths(log)
-    log.say('Reading %d engine paths (%d from the fixed list) ...' % (len(paths), log.data['fixed_path_list']))
+    log.say('Reading %d engine paths ...' % len(paths))
     t = time.time()
     res = {}
     try:
@@ -248,9 +325,21 @@ def probe_engine(br, log):
     except BridgeError as e:
         log.error('get_many', e)
     found = {p: i for p, i in res.items() if isinstance(i, dict) and i.get('ok')}
+    # Scene-Presets je Fussschalter (n aus ModeNew<n>) - 2 x 11 Pfade je Schalter
+    nums = [n for n in range(1, 17) if FS + '/ModeNew%d' % n in found]
+    more = ['%s/%sScene%dSlot%dPreset' % (FS, st, n, k) for n in nums for st in ('', 'State2')
+            for k in range(1, SLOTS + 1)]
+    if more:
+        try:
+            r = br.get_many(more)
+            found.update({p: i for p, i in r.items() if isinstance(i, dict) and i.get('ok')})
+            paths += more
+        except BridgeError as e:
+            log.error('scene presets', e)
     log.data['engine'] = found
     log.data['engine_missing'] = sorted(p for p in paths if p not in found)
     log.say('  %d exist, %d do not (%.1f s)' % (len(found), len(paths) - len(found), time.time() - t))
+    recheck_gaps(br, log, found)
 
     want = [p for p in ENTRIES_ALWAYS if p in found]
     want += [p for p, i in found.items() if p not in want and 0 < (i.get('numEntries') or 0) <= MAX_ENTRIES_AUTO]
@@ -263,6 +352,43 @@ def probe_engine(br, log):
     log.data['entries'] = ent
     log.say('  %d choice lists read' % len(ent))
     return found
+
+
+def recheck_gaps(br, log, found):
+    """Luecken in nummerierten Reihen (z. B. FootSwitch1, 3, 5 da, 2 und 4 nicht) einzeln pruefen:
+    gibt es das Property ueberhaupt (App.getProperty), und was antwortet ein einzelnes get?"""
+    gaps = []
+    for pat, n in NUMBERED:
+        have = [i for i in range(1, n + 1) if pat % i in found]
+        if have:
+            gaps += [pat % i for i in range(1, max(have)) if i not in have]
+    out = {}
+    if gaps:
+        try:
+            out = json.loads(br.eval(_EXIST_JS % json.dumps(gaps[:300])))
+        except (BridgeError, ValueError) as e:
+            log.error('gap check', e)
+        for p in gaps[:40]:
+            try:
+                single = br.get(p)
+            except BridgeError as e:
+                single = {'error': str(e)}
+            if isinstance(single, dict) and single.get('ok'):
+                found[p] = single
+            out[p] = {'exists': out.get(p), 'get': single}
+    log.data['gaps'] = out
+    if gaps:
+        log.say('  %d gaps in numbered paths checked one by one' % len(gaps))
+
+
+def probe_hardware(br, log, found):
+    """Scene-Plaetze aller Fussschalter (Zustand 1 und 2): je Platz (Block, Modus)."""
+    scenes = [p for p in found if re.search(r'/FootSwitch/(State2)?Scene\d+$', p)]
+    if not scenes:
+        return
+    r = json.loads(br.eval(_SCENE_JS % (json.dumps(sorted(scenes)), SLOTS)))
+    log.data['scenes'] = r
+    log.say('  scene slots of %d footswitch states read' % len(r))
 
 
 def probe_shell(br, log):
@@ -279,46 +405,125 @@ def probe_shell(br, log):
     log.data['system'] = out
     comp = out.get(SHELL[0], {}).get('out', '').strip()
     log.data['device'] = COMPATIBLE.get(comp.split(' ')[0], comp.split(' ')[0] if comp else '')
-    log.say('Device tree:', comp or '?', '->', log.data['device'] or 'unknown')
+    log.say('Device:', log.data['device'] or 'unknown', '(%s)' % (comp or '?'))
 
 
-def probe_db(br, log):
+def sql_all(br, q, page=None):
+    """Alle Zeilen einer Abfrage, seitenweise (aeltere Bruecken: Antwort hoechstens ~48 KB)."""
+    page = page or (2000 if br.long else 200)
+    rows, off = [], 0
+    while True:
+        r = br.sql('%s limit %d offset %d' % (q, page, off))
+        rows += r
+        if len(r) < page:
+            return rows
+        off += page
+
+
+def skeleton(o, key=''):
+    """Aufbau eines Rigs ohne Einstellungen: Schluessel und Typen bleiben, Werte werden zu
+    Platzhaltern (Text: Laenge). Fuer den Vergleich der Rig-Formate MX5/Pedalboard/Gigboard."""
+    if isinstance(o, dict):
+        return {k: skeleton(v, k) for k, v in o.items()}
+    if isinstance(o, list):
+        if key == 'childorder':          # Parameternamen = Aufbau, keine Einstellung
+            return o
+        return {'<list>': len(o), 'first': skeleton(o[0], key) if o else None}
+    if key in ('type', 'version', 'valueType'):
+        return o
+    if isinstance(o, bool):
+        return '<bool>'
+    if isinstance(o, (int, float)):
+        return '<num>'
+    if isinstance(o, str):
+        return '<str %d>' % len(o)
+    return None if o is None else '<%s>' % type(o).__name__
+
+
+def probe_db(br, log, found):
     if not br.v3:
         return
     db = {}
+    log.data['db'] = db
     for name, q in SQL:
         try:
             db[name] = br.sql(q)
         except BridgeError as e:
             db[name] = {'error': str(e)}
+    tables = [r['name'] for r in br.sql("select name from sqlite_master where type = 'table' "
+                                        "and name not like 'sqlite_%' order by name")]
+    counts = {}
+    for t in tables:
+        try:
+            counts[t] = br.sql('select count(*) as n from "%s"' % t)[0]['n']
+        except BridgeError as e:
+            counts[t] = str(e)
+    db['counts'] = counts
+    log.say('Database: ' + ', '.join('%s %s' % (n, t) for t, n in counts.items()))
+    # Rig-Liste: nur Namen und Ordnung (All-Rigs-Reihenfolge = rowid), keine Inhalte
+    try:
+        db['rigs'] = sql_all(br, "select rowid as r, id, name, show_order, color, prog_num, is_readonly, "
+                                 "json_extract(content, '$.info.version') as v from rigs order by rowid")
+    except BridgeError as e:
+        log.error('rig list', e)
+        db['rigs'] = sql_all(br, 'select rowid as r, id, name from rigs order by rowid')
+    # Setlist-/Song-Tabellen und alles Unbekannte vollstaendig, ohne grosse Spalten
+    db['tables'] = {}
+    for t in tables:
+        if t in DB_SKIP:
+            continue
+        try:
+            cols = [r['name'] for r in br.sql("select name from pragma_table_info('%s')" % t)]
+            keep = [c for c in cols if c.lower() not in DB_BIG_COLS] or cols[:1]
+            db['tables'][t] = {'columns': cols,
+                               'rows': sql_all(br, 'select rowid as _rowid, %s from "%s" order by rowid'
+                                               % (', '.join('"%s"' % c for c in keep), t))}
+        except BridgeError as e:
+            db['tables'][t] = {'error': str(e)}
+    # Aufbau des geladenen Rigs + je Rig-Version eines Beispiels
+    ids = []
+    loaded = (found.get(PC + '/Rigs/LoadedID') or {}).get('string')
+    if loaded:
+        ids.append(('loaded', loaded))
+    for row in db.get('rig_versions') or []:
+        if isinstance(row, dict):
+            r = br.sql("select id from rigs where json_extract(content, '$.info.version') is %s limit 1"
+                       % (sql_lit(row['v']) if row.get('v') is not None else 'null'))
+            if r and r[0]['id'] != loaded:
+                ids.append(('version %s' % row.get('v'), r[0]['id']))
+    db['rig_structure'] = {}
+    for label, rid in ids[:4]:
+        try:
+            r = br.sql('select content from rigs where id = %s' % sql_lit(rid))
+            db['rig_structure'][label] = skeleton(json.loads(r[0]['content'])) if r else 'not found'
+        except (BridgeError, ValueError, KeyError) as e:
+            db['rig_structure'][label] = 'error %s' % e
     if br.v4:
         try:
             db['status'] = br.action('status')
         except BridgeError as e:
             db['status'] = {'error': str(e)}
-    log.data['db'] = db
-    c = db.get('counts')
-    if isinstance(c, list) and c:
-        log.say('Database: %(rigs)s rigs, %(setlists)s setlists, %(blocks)s block presets' % c[0])
+
+
+def nums(found, pat, n=16):
+    return [i for i in range(1, n + 1) if pat % i in found]
 
 
 def summary(log, found):
     """Kurze lesbare Zusammenfassung oben in der Logdatei."""
-    def nums(pat, n=16):
-        return [i for i in range(1, n + 1) if pat % i in found]
     s = {
-        'bank_rig_slots': nums(PC + '/RigName%d'),
-        'setlist_bank_slots': nums(PC + '/SetRigName%d'),
-        'footswitches': nums(FS + '/FootSwitch%d'),
-        'footswitch_modes': nums(FS + '/ModeNew%d'),
-        'raw_footswitches': nums(RC + '/RawFootswitches/FS%d'),
-        'dialog_buttons': nums(RC + '/ButtonText%d'),
-        'chain_slots': nums(E + '/Patch/Chain/ModuleType%d'),
-        'param_names': nums(RC + '/ParamName%d'),
+        'bank_rig_slots': nums(found, PC + '/RigName%d'),
+        'setlist_bank_slots': nums(found, PC + '/SetRigName%d'),
+        'setlist_names_shown': nums(found, PC + '/SetName%d'),
+        'footswitches': nums(found, FS + '/FootSwitch%d'),
+        'footswitch_modes': nums(found, FS + '/ModeNew%d'),
+        'raw_footswitches': nums(found, RC + '/RawFootswitches/FS%d'),
+        'display_buttons': nums(found, RC + '/ButtonText%d'),
+        'encoders': nums(found, RC + '/Encoder%d'),
+        'chain_slots': nums(found, E + '/Patch/Chain/ModuleType%d'),
         'pedals': [p for p in (1, 2, 3, 4) if (E + '/Pedal%d/ModuleList1' % p) in found],
-        'board_modes': log.data.get('entries', {}).get(RC + '/BoardMode'),
-        'board_mode_now': (found.get(RC + '/BoardMode') or {}).get('string'),
-        'meters': [p.split('/')[2] for p in (E + '/InputMeter/Current', E + '/OutputMeterL/Current') if p in found],
+        'board_modes': log.data.get('entries', {}).get(BOARD),
+        'board_mode_now': (found.get(BOARD) or {}).get('string'),
     }
     log.data['summary'] = s
     log.say('')
@@ -327,163 +532,303 @@ def summary(log, found):
     return s
 
 
-# ---------- Fragen an den Tester ----------
+# ---------- gefuehrte Runde: beobachten, was der Tester am Geraet tut ----------
 def board_mode(br):
     try:
-        return (br.get(RC + '/BoardMode') or {}).get('string') or ''
+        return (br.get(BOARD) or {}).get('string') or ''
     except BridgeError:
         return ''
 
 
-def wait_for_view(br, log, view, how, timeout=180):
-    """Warten, bis das Geraet die Ansicht view zeigt (BoardMode). True = da, False = uebersprungen
-    (Taste) oder Zeit um. Ist sie schon da, wird nichts gefragt."""
-    if board_mode(br) == view:
-        return True
-    log.say('  -> Please switch the device to the %s view (%s).\n'
-            '     The test continues by itself as soon as the device shows it. (Press any key to skip.)' % (view, how))
+def wait_for_view(br, log, views, how, timeout=240):
+    """Warten, bis das Geraet eine der Ansichten views zeigt (BoardMode). Liefert die Ansicht oder
+    '' (Taste/Zeit um). Ist sie schon da, wird nichts gefragt."""
+    views = (views,) if isinstance(views, str) else tuple(views)
+    key_pressed()   # Reste der letzten Eingabe (Enter nach input()) verwerfen
+    now = board_mode(br)
+    if now in views:
+        return now
+    log.say('   -> Please switch the device to %s.\n'
+            '      This continues by itself as soon as the device shows it. (Press any key to skip.)' % how)
     t0 = time.time()
     while time.time() - t0 < timeout:
-        if board_mode(br) == view:
-            log.say('     OK, %s view detected.' % view)
-            return True
+        now = board_mode(br)
+        if now in views:
+            log.say('      OK, detected.')
+            return now
         if key_pressed():
             break
         time.sleep(0.3)
-    log.say('     Skipped.')
-    return False
+    log.say('      Skipped.')
+    return ''
 
 
-def record(br, paths, log, label, idle_stop=8.0, max_s=120.0):
-    """Pfade pollen und Aenderungen mit Zeit aufzeichnen; jeder Tastendruck wird sofort gemeldet.
-    Ende: idle_stop s nach dem letzten Druck, nach max_s oder per Taste."""
-    events, last = [], {}
-    t0, last_press, seen = time.time(), None, []
-    while True:
-        now = time.time()
+class Watcher:
+    """Pollt schnell die Schalter-Eingaenge + Ansicht und etwas langsamer alle gefundenen Pfade;
+    zeichnet Aenderungen mit Zeit auf. Pfade, die sich ohne Zutun aendern (Meter, Zeiten), werden
+    vorab in calibrate() erkannt (bevor eine Anweisung erscheint) und danach uebergangen. Jede neu
+    erreichte Ansicht wird festgehalten."""
+    def __init__(self, br, log, found):
+        self.br, self.log = br, log
+        self.fast = [p for p in found if '/RawFootswitches/FS' in p] + [BOARD]
+        self.broad = [p for p in found if not NOISY.search(p) and p not in self.fast]
+        self.view_paths = [p for p in found if VIEW_PATHS.search(p)]
+        self.last, self.noisy = {}, set()
+        self.views = log.data.setdefault('views', {})
+
+    def calibrate(self, secs=2.0):
+        """Alle Pfade einige Male lesen; was sich ohne Zutun aendert, gilt als Rauschen."""
+        first, t0 = compact(self.br, self.broad), time.time()
+        while time.time() - t0 < secs:
+            for p, v in compact(self.br, self.broad).items():
+                if first.get(p) != v:
+                    self.noisy.add(p)
+        self.broad = [p for p in self.broad if p not in self.noisy]
+
+    def snapshot(self, label):
         try:
-            cur = br.get_many(paths)
+            v = compact(self.br, self.view_paths)
         except BridgeError as e:
-            events.append({'t': round(now - t0, 2), 'error': str(e)})
-            time.sleep(0.3)
-            cur = {}
-        for p, i in cur.items():
-            v = {k: i.get(k) for k in ('value', 'state', 'index', 'string') if k in i}
-            if last.get(p) != v:
-                if p in last:
-                    events.append({'t': round(now - t0, 2), 'path': p, 'from': last[p], 'to': v})
-                    if p.startswith(RC + '/RawFootswitches/FS') and v.get('state') is True:
-                        last_press = now
+            self.log.error('snapshot ' + label, e)
+            return {}
+        self.views[label] = {p.replace(E, ''): x.get('string', x.get('value')) for p, x in v.items()}
+        return v
+
+    def run(self, label, idle_stop=8.0, max_s=150.0, presses=True, until_view=None):
+        events, t0 = [], time.time()
+        last_change, seen, left = None, [], False
+        self.last = compact(self.br, self.fast + self.broad)
+        # Die vielen uebrigen Pfade in Haeppchen reihum, damit die Schalter-Eingaenge alle ~70 ms
+        # gelesen werden (ein Druck dauert ~0.1-0.4 s; ein Durchlauf aller Pfade ~0.3 s)
+        chunks = [self.broad[i:i + BROAD_CHUNK] for i in range(0, len(self.broad), BROAD_CHUNK)] or [[]]
+        k = 0
+        key_pressed()   # Reste der letzten Eingabe verwerfen, sonst endet die Aufnahme sofort
+        while True:
+            now = time.time()
+            paths = self.fast + chunks[k % len(chunks)]
+            k += 1
+            try:
+                cur = compact(self.br, paths)
+            except BridgeError as e:
+                events.append({'t': round(now - t0, 2), 'error': str(e)})
+                if str(e).startswith(('Keine Antwort', 'MIDI-Port')):
+                    raise
+                time.sleep(0.3)
+                cur = {}
+            for p, v in cur.items():
+                old = self.last.get(p)
+                if old == v:
+                    continue
+                self.last[p] = v
+                events.append({'t': round(now - t0, 2), 'path': p, 'from': old, 'to': v})
+                if p.startswith(RC + '/RawFootswitches/FS'):
+                    if v.get('state') is True:
                         n = p.rsplit('FS', 1)[1]
-                        seen.append(n)
-                        print('     press %d detected (switch input %s)' % (len(seen), n), flush=True)
-                last[p] = v
-        if key_pressed() or now - t0 > max_s or (last_press and now - last_press > idle_stop):
-            break
-        time.sleep(0.03)
-    log.data.setdefault('watch', {})[label] = events
-    changed = sorted({e['path'] for e in events if 'path' in e})
-    log.say('  %d changes in %d paths' % (len(events), len(changed)))
-    presses = press_map(events)
-    log.data.setdefault('press_map', {})[label] = presses
-    for p in presses:
-        log.say('  %-6s -> %s' % (p['raw'], ', '.join(p['effects']) or '(nothing seen)'))
-    return events
+                        together = last_change and now - last_change < 0.15 and seen
+                        last_change = now
+                        if together:
+                            seen[-1] += '+' + n
+                            if presses:
+                                print('      ... together with switch input %s' % n, flush=True)
+                        else:
+                            seen.append(n)
+                            if presses:
+                                print('      press %d detected (switch input %s)' % (len(seen), n), flush=True)
+                elif p == BOARD:
+                    view = v.get('string') or '?'
+                    print('      view: %s' % view, flush=True)
+                    last_change = now
+                    if view not in self.views:
+                        self.snapshot(view)
+                else:
+                    last_change = now
+            if (key_pressed() and now - t0 > 1.0) or now - t0 > max_s or (last_change and now - last_change > idle_stop):
+                break
+            # until_view: Ende, sobald das Geraet nach einem Abstecher wieder diese Ansicht zeigt
+            view = (self.last.get(BOARD) or {}).get('string')
+            left = left or bool(until_view and view and view != until_view)
+            if left and view == until_view and last_change and now - last_change > 2.0:
+                break
+            time.sleep(0.03)
+        w = self.log.data.setdefault('watch', {})
+        w[label] = events
+        self.log.data['noisy_paths'] = sorted(self.noisy)
+        changed = sorted({e['path'] for e in events if 'path' in e})
+        self.log.say('   %d changes in %d paths' % (len(events), len(changed)))
+        pm = press_map(events)
+        self.log.data.setdefault('press_map', {})[label] = pm
+        for p in pm:
+            self.log.say('   %-6s -> %s' % (p['raw'], ', '.join(p['effects']) or '(nothing seen)'))
+        return events
 
 
 def press_map(events):
-    """Je Druck (RawFootswitches/FS<n> wird Down) die Aenderungen bis zum naechsten Druck:
-    welche FootSwitch<n> angehen, welches Rig geladen wird, welche Szene. Am MX5 (2026-10-04):
-    FS1-3 -> FootSwitch5-7 / LastScene 0-2 (Stomp), Bank-Rig 1-3 (Rig)."""
+    """Je Druck die Aenderungen bis zum naechsten Druck, hoechstens 1.5 s: welche FootSwitch<n>
+    angehen, welches Rig geladen wird, welche Szene/Ansicht, welche Aktion (NOOP -> OP, z. B.
+    NextBank). Gleichzeitig gedrueckte Schalter (Down innerhalb 0.15 s; am MX5 blaettert FS1+FS2 /
+    FS2+FS3 die Bank) zaehlen als ein Druck "FS1+2". Nach einem Rig-Wechsel wird nichts mehr
+    zugeordnet (das sind Werte des neuen Rigs)."""
     downs = [e for e in events if e.get('path', '').startswith(RC + '/RawFootswitches/FS')
              and (e.get('to') or {}).get('state') is True]
+    groups = []
+    for d in downs:
+        if groups and d['t'] - groups[-1][0]['t'] <= 0.15:
+            groups[-1].append(d)
+        else:
+            groups.append([d])
     out = []
-    for i, d in enumerate(downs):
-        end = downs[i + 1]['t'] if i + 1 < len(downs) else float('inf')
-        eff = []
+    for i, g in enumerate(groups):
+        t = g[0]['t']
+        end = min(groups[i + 1][0]['t'] if i + 1 < len(groups) else float('inf'), t + 1.5)
+        eff, loaded = [], False
         for e in events:
-            if not (d['t'] <= e.get('t', -1) < end) or 'path' not in e:
+            if loaded or not (t <= e.get('t', -1) < end) or 'path' not in e:
                 continue
             p, to = e['path'], e.get('to') or {}
             name = p.rsplit('/', 1)[1]
-            if name.startswith('FootSwitch') and name[10:].isdigit() and to.get('state') is True:
-                eff.append(name + ' on')
+            if re.match(r'FootSwitch(On)?\d+$', name):
+                eff.append('%s %s' % (name, 'on' if to.get('state') else 'off'))
             elif name == 'LastScene':
                 eff.append('LastScene ' + str(to.get('string')))
-            elif name == 'LoadedName':
-                eff.append('loads ' + str(to.get('string')))
+            elif name in ('LoadedName', 'LoadedID'):
+                if name == 'LoadedName':
+                    eff.append('loads ' + str(to.get('string')))
+                loaded = True
             elif name == 'BoardMode':
                 eff.append('view ' + str(to.get('string')))
-        out.append({'raw': d['path'].rsplit('/', 1)[1], 't': d['t'], 'effects': eff})
+            elif re.match(r'(RigName|SetName|SetRigName|SongName)1$', name):
+                eff.append('%s -> %s' % (name, to.get('string')))
+            elif to.get('string') == 'OP' and '/RawFootswitches/' not in p:
+                eff.append(name)
+        raw = 'FS' + '+'.join(d['path'].rsplit('FS', 1)[1] for d in g)
+        out.append({'raw': raw, 't': t, 'effects': eff})
     return out
 
 
-def interactive(br, log, found):
-    """Gefuehrter Teil: nur Fragen, die das Programm nicht selbst beantworten kann. Die Ansicht des
-    Geraets wird selbst erkannt (BoardMode); in der Stomp-Ansicht laedt ein Fussschalter kein Rig
-    (am MX5 geprueft) - in der Rig-Ansicht wuerde er, daher dort kein Schaltertest."""
-    q = log.data.setdefault('answers', {})
-    modes = log.data.get('entries', {}).get(RC + '/BoardMode') or []
-    log.say('\n========== Part 2: three short checks with you ==========')
-    log.say('(Just press Enter if you do not know an answer.)\n')
-    q['footswitch_count'] = ask('1) How many footswitches does your device have? Number: ')
+def labels(found, br):
+    """Displaytext je Schalter-Eingang {n: text} (RedirCtrl/ButtonText<n>)."""
+    ns = nums(found, RC + '/ButtonText%d')
+    try:
+        cur = compact(br, [RC + '/ButtonText%d' % n for n in ns])
+    except BridgeError:
+        return {}
+    return {n: (cur.get(RC + '/ButtonText%d' % n) or {}).get('string') or '' for n in ns}
 
-    names = [i for i in range(1, 17) if PC + '/RigName%d' % i in found]
-    log.say('\n2) Rig names')
-    if names and 'Rig' in modes and wait_for_view(br, log, 'Rig', 'the list of rigs in banks'):
-        try:
-            cur = br.get_many([PC + '/RigName%d' % i for i in names])
-            log.data['rig_view'] = cur
-            log.say('   The bridge reads these names for the bank on the display:')
-            for i in names:
-                log.say('     %d. %s' % (i, (cur.get(PC + '/RigName%d' % i) or {}).get('string')))
-        except BridgeError as e:
-            log.error('rig view', e)
-        q['rigs_per_bank'] = ask('   How many rigs does the display show in one bank? Number: ')
-        q['rig_names_match'] = ask('   Are these the same names, in the same order, as on the display? [y/n] ')
 
-    log.say('\n3) Footswitch test')
-    if 'Stomp' in modes:
-        ok = wait_for_view(br, log, 'Stomp', 'the view where the footswitches switch effects on and off')
-    else:
-        ok = ask('   Switch the device to the view where the footswitches switch effects on and off, '
-                 'then press Enter (or type s to skip): ').lower() != 's'
-    if not ok:
+def show_board(log, lab, raw):
+    """Schalter wie am Geraet zeigen: bei mehr als 6 Eingaengen zwei Reihen."""
+    ns = raw or sorted(lab)
+    rows = [ns[:len(ns) // 2], ns[len(ns) // 2:]] if len(ns) > 6 else [ns]
+    for row in rows:
+        log.say('      ' + '  '.join('[%d %s]' % (n, lab.get(n) or '-') for n in row))
+
+
+def step_rig(br, log, found, w, q):
+    log.say('\nStep 1 of 3 - Rig view')
+    if not wait_for_view(br, log, 'Rig', 'the RIG view (the list of rigs in banks)'):
         return
-    if (found.get(PC + '/Rigs/Dirty') or {}).get('state'):
-        log.say('   Note: the current rig has unsaved changes on the device. The test does not change that.')
-    paths = [p for p in found if p.startswith((FS + '/FootSwitch', RC + '/RawFootswitches/', FS + '/SceneState',
-                                               FS + '/LastScene', RC + '/ButtonText'))]
-    paths += [RC + '/BoardMode', PC + '/Rigs/LoadedName', PC + '/Rigs/Dirty']
-    log.say('   Now press EACH footswitch once, from left to right (top row first if there are two).\n'
-            '   Wait about a second between presses. Every press is confirmed here.\n'
-            '   The test ends by itself 8 seconds after your last press.')
-    record(br, paths, log, 'footswitches_stomp')
-    n = len(log.data.get('press_map', {}).get('footswitches_stomp', []))
-    if n == 0:
+    w.snapshot('Rig')
+    names = nums(found, PC + '/RigName%d')
+    cur = compact(br, [PC + '/RigName%d' % i for i in names])
+    log.say('   The bridge reads these rig names for the bank on the display:')
+    log.say('      ' + ' | '.join((cur.get(PC + '/RigName%d' % i) or {}).get('string') or '-' for i in names))
+    q['rig_names_match'] = ask('   Are these the names on the display, in the same order? [y/n] ')
+    lab = labels(found, br)
+    bank = [(n, t) for n, t in lab.items() if re.search(r'bank', t, re.I)]
+    which = ' and '.join('"%s" (switch %d)' % (t, n) for n, t in bank) or \
+        'the switches for bank down and bank up (on some devices two switches together)'
+    log.say('   Now page through the banks: press %s, once each.\n'
+            '   This only pages through the banks; it does not load a rig.\n'
+            '   (Press any key when done - it also ends by itself 6 seconds after the last press.)' % which)
+    w.run('rig_view_banks', idle_stop=6.0, max_s=90.0)
+
+
+def step_stomp(br, log, found, w, q):
+    log.say('\nStep 2 of 3 - Footswitches')
+    if not wait_for_view(br, log, 'Stomp', 'the STOMP view (the view where the footswitches switch effects '
+                                           'and scenes on and off)'):
+        return
+    w.snapshot('Stomp')
+    raw = nums(found, RC + '/RawFootswitches/FS%d')
+    lab = labels(found, br)
+    q['footswitch_inputs'] = len(raw)
+    if lab:
+        log.say('   The display shows these switches (switch number and text):')
+        show_board(log, lab, raw)
+        press = [n for n in (raw or sorted(lab)) if not SKIP_LABEL.search(lab.get(n) or '')]
+        skip = [n for n in (raw or sorted(lab)) if n not in press]
+        log.say('   Press these switches one after another, about a second apart: %s'
+                % ', '.join(str(n) for n in press))
+        if skip:
+            log.say('   Leave out: %s (they change the rig, the view or the tempo).'
+                    % ', '.join('%d %s' % (n, lab.get(n)) for n in skip))
+    else:
+        log.say('   Press each switch that turns an effect or a scene on/off, from left to right\n'
+                '   (top row first). Leave out switches that change the rig or the view.')
+    log.say('   Every press is confirmed here. The test ends 8 seconds after your last press.\n'
+            '   Afterwards you can press the switches again to get your sound back as it was.')
+    w.run('footswitches_stomp')
+    if not log.data['press_map'].get('footswitches_stomp'):
         log.say('   No press was detected. That is useful information too.')
+
+
+def step_setlists(br, log, found, w, q):
+    counts = (log.data.get('db') or {}).get('counts') or {}
+    if not counts.get('setlists'):
+        return
+    log.say('\nStep 3 of 3 - Setlists (optional)')
+    log.say('   Your device has %s setlist(s). This step watches how the device shows setlists and songs.\n'
+            '   Opening a setlist loads a rig - save unsaved changes first.' % counts.get('setlists'))
+    if ask('   Do this step? [y/n] ').lower()[:1] != 'y':
+        q['setlist_step'] = 'skipped'
+        return
+    q['setlist_step'] = 'done'
+    # Keine bestimmte Ansicht verlangen: wie man an Pedalboard/Gigboard zu den Setlists kommt, ist
+    # nicht bekannt - die Ansichten (BoardMode) erkennt der Watcher selbst.
+    log.say('   Now open one of your setlists the way you normally do (footswitches or touchscreen),\n'
+            '   switch to the next song or rig once, then go back to the rig view.\n'
+            '   The program notices every screen you open and stops by itself when you are back in the\n'
+            '   rig view. (Or press any key when done.)')
+    w.run('setlists', idle_stop=25.0, max_s=240.0, until_view='Rig')
+
+
+def interactive(br, log, found):
+    """Gefuehrter Teil: nur was das Programm nicht selbst herausfinden kann. Die Ansicht wird selbst
+    erkannt (BoardMode); in der Stomp-Ansicht laedt ein Effektschalter kein Rig."""
+    q = log.data.setdefault('answers', {})
+    log.say('\n========== Part 2: watching while you use the device (about 2 minutes) ==========')
+    log.say('This program still changes nothing. It only watches what you do on the device.')
+    if (found.get(PC + '/Rigs/Dirty') or {}).get('state'):
+        log.say('Note: the current rig has unsaved changes. Nothing here saves or discards them.')
+    w = Watcher(br, log, found)
+    guarded(log, 'calibrate', w.calibrate)
+    for step in (step_rig, step_stomp, step_setlists):
+        guarded(log, step.__name__, step, br, log, found, w, q)
+        save(log)
     q['notes'] = ask('\nAnything else you noticed? (one line, optional): ')
 
 
-def write(log):
-    dev = log.data.get('device') or (log.data.get('answers', {}).get('device') or '').strip() or 'device'
-    dev = ''.join(c for c in dev if c.isalnum())[:20] or 'device'
-    name = 'HeadRush_Bridge_Diagnose_%s_%s.txt' % (dev, datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
+def save(log):
+    """Log schreiben (nach jedem Teil, damit bei Absturz/Abbruch etwas da ist)."""
+    if not log.path:
+        dev = ''.join(c for c in (log.data.get('device') or 'device') if c.isalnum())[:20] or 'device'
+        name = 'HeadRush_Bridge_Diagnose_%s_%s.txt' % (dev, datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
+        home = os.path.expanduser('~')
+        # neben der EXE; ist der Ordner schreibgeschuetzt (z. B. Programme), dann Desktop / Dokumente / Temp
+        for d in (OUT_DIR, os.path.join(home, 'Desktop'), os.path.join(home, 'Documents'), home,
+                  os.environ.get('TEMP', '')):
+            if d and os.path.isdir(d) and os.access(d, os.W_OK):
+                log.path = os.path.join(d, name)
+                break
     text = '\n'.join(log.lines) + '\n\n===== JSON =====\n' + \
         json.dumps(log.data, indent=1, ensure_ascii=False, sort_keys=True) + '\n'
-    # neben der EXE; ist der Ordner schreibgeschuetzt (z. B. Programme), dann Desktop / Dokumente / Temp
-    home = os.path.expanduser('~')
-    for d in (OUT_DIR, os.path.join(home, 'Desktop'), os.path.join(home, 'Documents'), home,
-              os.environ.get('TEMP', '')):
-        if not d:
-            continue
+    for _ in range(2):
         try:
-            path = os.path.join(d, name)
-            with open(path, 'w', encoding='utf-8', newline='\n') as f:
+            with open(log.path, 'w', encoding='utf-8', newline='\n') as f:
                 f.write(text)
-            return path
-        except OSError:
-            continue
+            return log.path
+        except (OSError, TypeError):
+            log.path = os.path.join(os.environ.get('TEMP', os.path.expanduser('~')), os.path.basename(log.path or 'x'))
     raise OSError('Could not write the log file anywhere')
 
 
@@ -513,18 +858,21 @@ def main():
     log = Log()
     log.say('HeadRush Bridge device diagnosis %s' % TOOL_VERSION)
     log.say('This program only READS from your device. It changes nothing: no rigs, no settings.')
-    log.say('The log contains rig/setlist names and settings shown by the device, no audio and no rig contents.\n')
+    log.say('The log contains the names of your rigs, setlists and songs, the device settings and the layout\n'
+            'of a rig (which settings exist, not their values). No audio, no rig sounds.\n')
     br = None
     rc = 0
     try:
         br = open_bridge(log, (a.pin, a.pout) if a.pin and a.pout else None, wait=not a.auto)
         log.data['bridge'] = {'version': br.version, 'vnum': br.vnum}
         log.say('Bridge:', br.version)
-        log.say('\n========== Part 1: reading the device (about 10 seconds) ==========')
-        probe_shell(br, log)
-        found = probe_engine(br, log)
-        probe_db(br, log)
+        log.say('\n========== Part 1: reading the device (about 20 seconds) ==========')
+        guarded(log, 'system', probe_shell, br, log)
+        found = guarded(log, 'engine', probe_engine, br, log) or {}
+        guarded(log, 'scenes', probe_hardware, br, log, found)
+        guarded(log, 'database', probe_db, br, log, found)
         summary(log, found)
+        save(log)
         if not a.auto:
             interactive(br, log, found)
     except KeyboardInterrupt:
@@ -537,8 +885,8 @@ def main():
     finally:
         if br:
             br.close()
-    path = write(log)
     log.say('\n========== Done ==========')
+    path = save(log)
     log.say('Log file: %s' % path)
     if a.auto:
         return rc

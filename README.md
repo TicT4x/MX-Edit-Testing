@@ -8,15 +8,15 @@ here built for all three devices.
 
 The Pedalboard and the Gigboard run the same firmware line (2.7) as the MX5: the same start
 scripts, the same Linux kernel, the same rig database. The bridge changes the same files on all
-three devices. **It has not been tested on a real Pedalboard or Gigboard yet.** If you own one
-and want to help, this page explains how.
+three devices. **It runs on a real Pedalboard (first report); the Gigboard has not been tested
+yet.** If you own one and want to help, this page explains how.
 
 ## Status
 
 | | MX5 | Pedalboard | Gigboard |
 |---|---|---|---|
 | Patcher builds an updater | yes | yes (testing patcher) | yes (testing patcher) |
-| Bridge firmware runs on the device | tested | **unknown – please test** | **unknown – please test** |
+| Bridge firmware runs on the device | tested | **runs** (first report, thank you!) | **unknown – please test** |
 | MX5 Editor | full | refuses to connect for now | refuses to connect for now |
 
 The editor knows only the MX5's hardware: three footswitches and banks of three rigs. The
@@ -49,20 +49,27 @@ wrong rigs and press the wrong switches. Editing `.rig` files offline works on e
    USB transfer mode.
 5. Double-click `HeadRush_Bridge_Diagnose.exe` and follow the window. You need nothing special on the
    device: no test rig and no particular setlist. The program **only reads** and changes nothing.
-   * It waits until the device is connected and reads it (about 10 seconds).
-   * It asks how many footswitches the device has, then shows the rig names it reads and asks
-     whether they match the display.
-   * For the footswitch test it asks you to switch to the view where the footswitches turn
-     effects on and off. It notices by itself when you have done that. In this view a switch
-     does not change the rig. Press each switch once. Every press is confirmed on screen, and
-     the test ends by itself.
+   * It waits until the device is connected and reads it (about 20 seconds).
+   * Then it watches while you use the device, in three short steps (about 2 minutes). It
+     always tells you which view to open and notices by itself when you are there:
+     1. **Rig view:** it shows the rig names it reads. Say whether they match the display, then
+        page one bank down and up again. This does not load a rig.
+     2. **Stomp view:** it shows the switches with their display texts and tells you which ones
+        to press: the effect and scene switches. Leave out the switches that change the rig or
+        the view. Every press is confirmed on screen, and the step ends by itself.
+     3. **Setlists (optional):** if you use setlists, open one and switch to the next song or rig.
+        This loads a rig, so save unsaved changes first. You can skip this step.
 6. At the end the program saves `HeadRush_Bridge_Diagnose_<device>_<time>.txt`, shows it in Explorer
    and opens the *Diagnosis log* form of this repository in your browser. Fill in the form and
    drag the file into it. You need a free GitHub account. The log is also saved if something
    goes wrong. Please send it then too.
 
-The log contains the rig and setlist names your device shows, the device settings and the
-database layout. It does **not** contain your rig contents or any audio.
+The log contains the names of your rigs, setlists and songs, the device settings, the database
+layout and the layout of a rig: which settings a rig has, but not their values. It does **not**
+contain your sounds or any audio.
+
+If you already sent a log with an older version of the diagnosis, please run the new one once
+more. It collects a lot more.
 
 ## If something goes wrong
 
